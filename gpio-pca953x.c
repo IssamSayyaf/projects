@@ -71,3 +71,90 @@ static const struct i2c_device_id pca953x_id[] = {
 	{ "xra1202", 8  | PCA953X_TYPE },
 	{ }
 };
+MODULE_DEVICE_TABLE(i2c, pca953x_id);
+
+#define MAX_BANK 5
+#define BANK_SZ 8
+
+#define NBANK(chip) (chip->gpio_chip.ngpio / BANK_SZ)
+
+struct pca953x_chip {
+        unsigned gpio_start;
+        u8 reg_output[MAX_BANK];
+        u8 reg_direction[MAX_BANK];
+        struct mutex i2c_lock;
+
+#ifdef CONFIG_GPIO_PCA953X_IRQ
+        struct mutex irq_lock;
+        u8 irq_mask[MAX_BANK];
+        u8 irq_stat[MAX_BANK];
+        u8 irq_trig_raise[MAX_BANK];
+        u8 irq_trig_fall[MAX_BANK];
+#endif
+
+        struct i2c_client *client;
+        struct gpio_chip gpio_chip;
+        const char *const *names;
+        int	chip_type;
+};
+
+struct pca953x_chip *my_chip;
+static int Direction;
+static int Output;
+static int Invert_Output;
+
+static inline struct pca953x_chip *to_pca(struct gpio_chip *gc)
+{
+        return container_of(gc, struct pca953x_chip, gpio_chip);
+}
+
+static int pca953x_write_single(struct pca953x_chip *chip, int reg, u32 val,
+                int off)
+{
+        int ret = 0;
+        int bank_shift = fls((chip->gpio_chip.ngpio - 1) / BANK_SZ);
+        int offset = off / BANK_SZ;
+
+        ret = i2c_smbus_write_byte_data(chip->client,
+                        (reg << bank_shift) + offset, val);
+
+        if (ret < 0) {
+                dev_err(&chip->client->dev, "failed writing register\n");
+                return ret;
+        }
+
+        return 0;
+}
+
+
+static void pca953x_gpio_set_value(struct gpio_chip *gc, unsigned int off, int val)
+{
+        struct pca953x_chip *chip = to_pca(gc);
+        u8 reg_val;
+        int ret, offset = 0;
+
+
+        mutex_lock(&chip->i2c_lock);
+        if (val)
+                reg_val = chip->reg_output[off / BANK_SZ]
+                        | (1u << (off % BANK_SZ));
+        else
+                reg_val = chip->reg_output[off / BANK_SZ]
+                        & ~(1u << (off % BANK_SZ));
+
+        switch (chip->chip_type) {
+                case PCA953X_TYPE:
+                        offset = PCA953X_OUTPUT;
+                        break;
+                case PCA957X_TYPE:
+                        offset = PCA957X_OUT;
+                        break;
+        }
+        ret = pca953x_write_single(chip, offset, reg_val, off);
+        if (ret)
+                goto exit;
+
+        chip->reg_output[off / BANK_SZ] = reg_val;
+exit:
+        mutex_unlock(&chip->i2c_lock);
+}
